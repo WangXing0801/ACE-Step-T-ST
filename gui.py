@@ -302,8 +302,14 @@ class ACEStepGUI(QWidget):
     def on_step_finished(self, step_index):
         self.step_status[step_index] = True
         self.log(f"步骤 {step_index + 1} 完成。")
+
+        # 如果是训练完成（第5步）
+        if step_index == 4:
+            self.process_lora_alpha()
+
         if step_index < 4:
             self.step_buttons[step_index + 1].setEnabled(True)
+
 
     def start_tensorboard(self):
         try:
@@ -322,6 +328,62 @@ class ACEStepGUI(QWidget):
         self.log_area.clear()
         self.log("已重置所有设置。")
 
+    def process_lora_alpha(self):
+        """训练完成后自动处理 LoRA 权重"""
+        try:
+            # 获取训练输出路径（假设是与 prep 目录同级的 checkpoints）
+            dataset_path = os.path.join(self.base_audio_dir, self.current_audio_name + "_prep")
+            checkpoint_dir = os.path.join(os.path.dirname(dataset_path), "checkpoints")
+
+            if not os.path.exists(checkpoint_dir):
+                self.log("未找到 checkpoints 目录，跳过 LoRA alpha 处理。")
+                return
+
+            # 查找最新的 step 文件夹
+            step_dirs = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch=") and os.path.isdir(os.path.join(checkpoint_dir, d))]
+            if not step_dirs:
+                self.log("未找到任何 epoch-step 目录，跳过 LoRA alpha 处理。")
+                return
+
+            latest_dir = sorted(step_dirs, key=lambda x: int(x.split("step=")[-1].split("_")[0]))[-1]
+            lora_dir = os.path.join(checkpoint_dir, latest_dir)
+            input_lora_path = os.path.join(lora_dir, "pytorch_lora_weights.safetensors")
+
+            if not os.path.exists(input_lora_path):
+                self.log(f"未找到 LoRA 文件: {input_lora_path}")
+                return
+
+            # 输出文件路径
+            output_lora_path = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
+
+            # 配置文件路径（假设 config 文件在项目根目录）
+            lora_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "lora_config_transformer_only.json")
+
+            if not os.path.exists(lora_config_path):
+                self.log(f"未找到 LoRA 配置文件: {lora_config_path}")
+                return
+
+            # 构建命令
+            cmd = (
+                f'python add_alpha_in_lora.py '
+                f'--input_name "{input_lora_path}" '
+                f'--output_name "{output_lora_path}" '
+                f'--lora_config_path "{lora_config_path}"'
+            )
+
+            self.log("开始处理 LoRA 权重，写入 alpha 信息...")
+            self.log(f"执行命令: {cmd}")
+
+            result = subprocess.run(cmd, shell=True, cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True)
+            if result.returncode == 0:
+                self.log("✅ LoRA alpha 处理成功完成！")
+                self.log(f"新 LoRA 文件保存为: {output_lora_path}")
+            else:
+                self.log("❌ LoRA alpha 处理失败:")
+                self.log(result.stderr)
+
+        except Exception as e:
+            self.log(f"处理 LoRA alpha 时发生异常: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
