@@ -342,6 +342,10 @@ class ACEStepGUI(QWidget):
                 f'--save_every_n_train_steps {self.save_steps_spin.value()}'
             )
             
+            # 在训练开始前检查并清空checkpoints文件夹
+            if not self.cleanup_checkpoints_before_training(audio_dir_with_name):
+                return  # 用户取消了操作
+            
             # 启用停止训练按钮
             self.is_training = True
             self.stop_training_btn.setEnabled(True)
@@ -358,30 +362,78 @@ class ACEStepGUI(QWidget):
             # 训练步骤使用单独的处理
             self.start_training(cmd, cwd, step_index)
 
+    def cleanup_checkpoints_before_training(self, audio_dir_with_name):
+        """在训练开始前检查并清空checkpoints文件夹"""
+        try:
+            checkpoint_dir = os.path.join(os.path.dirname(audio_dir_with_name), "checkpoints")
+            
+            # 如果checkpoints目录不存在，创建它
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
+                self.log(f"创建checkpoints目录: {checkpoint_dir}")
+                return
+            
+            # 如果目录存在但为空，直接返回
+            if not os.listdir(checkpoint_dir):
+                self.log("checkpoints目录为空，无需清理")
+                return
+            
+            # 目录不为空，询问用户是否清空
+            reply = QMessageBox.question(
+                self,
+                "确认",
+                f"checkpoints目录 {checkpoint_dir} 不为空，是否清空后继续训练？\n注意：清空后将丢失之前的训练进度！",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 清空目录
+                for item in os.listdir(checkpoint_dir):
+                    item_path = os.path.join(checkpoint_dir, item)
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                self.log(f"已清空checkpoints目录: {checkpoint_dir}")
+            else:
+                self.log("用户取消了训练操作")
+                # 重新启用训练按钮
+                self.step_buttons[4].setText("5. 开始训练")
+                self.step_buttons[4].setEnabled(True)
+                self.is_training = False
+                self.stop_training_btn.setEnabled(False)
+                return False
+                
+        except Exception as e:
+            self.log(f"清理checkpoints目录时发生错误: {str(e)}")
+            QMessageBox.critical(self, "错误", f"清理checkpoints目录时发生错误: {str(e)}")
+            # 重新启用训练按钮
+            self.step_buttons[4].setText("5. 开始训练")
+            self.step_buttons[4].setEnabled(True)
+            self.is_training = False
+            self.stop_training_btn.setEnabled(False)
+            return False
+            
+        return True
+
+
     def start_training(self, cmd, cwd, step_index):
         """开始训练"""
         try:
             self.log("开始训练...")
             self.log(f"执行命令: {cmd}")
 
-            # 启动训练进程
-            self.training_process = subprocess.Popen(
-                cmd, 
-                shell=True, 
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-            # 启动线程监控训练输出
-            self.monitor_training(step_index)
+            # 创建训练工作线程
+            self.training_thread = TrainingWorkerThread(cmd, cwd)
+            self.training_thread.output.connect(self.log)
+            self.training_thread.error.connect(self.log)
+            self.training_thread.finished.connect(lambda: self.on_training_finished(step_index))
+            self.training_thread.start()
 
         except Exception as e:
             self.log(f"启动训练时发生异常: {str(e)}")
             self.on_training_finished(step_index)
+
 
     def monitor_training(self, step_index):
         """监控训练输出"""
@@ -418,19 +470,14 @@ class ACEStepGUI(QWidget):
     def stop_training(self):
         """停止训练"""
         try:
-            if self.training_process and self.training_process.poll() is None:
+            if hasattr(self, 'training_thread') and self.training_thread.isRunning():
                 self.log("正在停止训练...")
-                # 终止进程
-                self.training_process.terminate()
-                try:
-                    # 等待进程结束，最多等待10秒
-                    self.training_process.wait(timeout=10)
-                    self.log("训练已停止")
-                except subprocess.TimeoutExpired:
-                    # 如果进程没有响应，强制杀死
-                    self.training_process.kill()
-                    self.log("训练已强制停止")
-                self.training_process = None
+                self.training_thread.stop()
+                self.training_thread.wait(5000)  # 等待最多5秒
+                if self.training_thread.isRunning():
+                    self.training_thread.terminate()
+                    self.training_thread.wait()
+                self.log("训练已停止")
             else:
                 self.log("当前没有正在运行的训练任务")
         except Exception as e:
@@ -447,7 +494,48 @@ class ACEStepGUI(QWidget):
         self.is_training = False
         self.stop_training_btn.setEnabled(False)
         self.step_buttons[4].setText("5. 开始训练")
+        
+        # 验证LoRA权重
+        self.validate_lora_weights()
+        
         self.on_step_finished(step_index)
+
+
+    def validate_lora_weights(self):
+        """验证LoRA权重是否正确处理"""
+        try:
+            dataset_path = os.path.join(self.base_audio_dir, self.current_audio_name + "_prep")
+            checkpoint_dir = os.path.join(os.path.dirname(dataset_path), "checkpoints")
+            
+            if not os.path.exists(checkpoint_dir):
+                return False
+                
+            step_dirs = [d for d in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, d)) and "step=" in d]
+            if not step_dirs:
+                return False
+                
+            latest_dir = sorted(step_dirs, key=lambda x: int(x.split("step=")[-1].split("_")[0]))[-1]
+            lora_dir = os.path.join(checkpoint_dir, latest_dir)
+            processed_lora = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
+            original_lora = os.path.join(lora_dir, "pytorch_lora_weights.safetensors")
+            
+            # 检查处理后的文件是否存在
+            if os.path.exists(processed_lora):
+                self.log("✓ 使用带alpha的LoRA权重文件")
+                return True
+            elif os.path.exists(original_lora):
+                self.log("⚠ 警告：使用原始LoRA权重文件，可能缺少alpha信息")
+                return True
+            else:
+                self.log("✗ 未找到LoRA权重文件")
+                return False
+                
+        except Exception as e:
+            self.log(f"验证LoRA权重时出错: {str(e)}")
+            return False
+
+
+
 
     def on_step_finished(self, step_index):
         self.step_status[step_index] = True
@@ -587,10 +675,16 @@ class ACEStepGUI(QWidget):
             output_lora_path = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
             lora_config_path = os.path.join(lora_dir, "lora_config.json")
 
+            # 检查原始LoRA文件是否存在
             if not os.path.exists(input_lora_path):
                 self.log(f"未找到 LoRA 权重文件: {input_lora_path}")
+                # 检查是否已经有处理过的文件
+                if os.path.exists(output_lora_path):
+                    self.log("使用已存在的带alpha的LoRA文件")
+                    return
                 return
 
+            # 检查配置文件是否存在
             if not os.path.exists(lora_config_path):
                 self.log(f"未找到 LoRA 配置文件: {lora_config_path}")
                 return
@@ -610,6 +704,12 @@ class ACEStepGUI(QWidget):
             if result.returncode == 0:
                 self.log("✅ LoRA alpha 处理成功完成！")
                 self.log(f"新 LoRA 文件保存为: {output_lora_path}")
+                # 重要：删除原始文件，确保使用带alpha的文件
+                try:
+                    os.remove(input_lora_path)
+                    self.log("已删除原始LoRA文件，确保使用带alpha的版本")
+                except Exception as e:
+                    self.log(f"删除原始LoRA文件时出错: {str(e)}")
             else:
                 self.log("❌ LoRA alpha 处理失败:")
                 self.log(result.stderr)
@@ -617,6 +717,62 @@ class ACEStepGUI(QWidget):
         except Exception as e:
             self.log(f"处理 LoRA alpha 时发生异常: {str(e)}")
 
+class TrainingWorkerThread(QThread):
+    output = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, command, cwd=None):
+        super().__init__()
+        self.command = command
+        self.cwd = cwd
+        self.process = None
+        self._stop_flag = False
+
+    def run(self):
+        try:
+            self.process = subprocess.Popen(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=True,
+                cwd=self.cwd,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # 实时读取输出
+            while not self._stop_flag and self.process.poll() is None:
+                output = self.process.stdout.readline()
+                if output:
+                    self.output.emit(output.strip())
+            
+            # 读取剩余输出
+            if self.process and not self._stop_flag:
+                stdout, stderr = self.process.communicate()
+                if stdout:
+                    for line in stdout.splitlines():
+                        if line.strip():
+                            self.output.emit(line.strip())
+                if stderr:
+                    self.error.emit(f"错误: {stderr}")
+                
+                if self.process.returncode == 0:
+                    self.output.emit("训练完成！")
+                else:
+                    self.error.emit(f"训练异常结束，返回码: {self.process.returncode}")
+            
+            self.finished.emit()
+            
+        except Exception as e:
+            self.error.emit(f"训练过程中发生异常: {str(e)}")
+            self.finished.emit()
+
+    def stop(self):
+        self._stop_flag = True
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
