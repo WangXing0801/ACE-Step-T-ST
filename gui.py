@@ -6,11 +6,14 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog, QTextEdit,
     QVBoxLayout, QHBoxLayout, QLineEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
-    QFormLayout, QMessageBox
+    QFormLayout, QMessageBox, QTextBrowser
 )
 from PySide6.QtCore import Qt, QThread, Signal
 import webbrowser
 import re
+import json
+import threading
+
 
 
 class WorkerThread(QThread):
@@ -48,14 +51,30 @@ class ACEStepGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ACE-Step 模型训练 GUI")
-        self.resize(900, 700)
+        self.resize(1000, 800)
 
         # 基础目录
         self.base_audio_dir = r"D:\AIJOB\ACE-Step-T\ACE-Step\Taudio"
         self.current_audio_name = ""  # 不带扩展名的文件名
         self.current_audio_full_path = ""  # 完整路径
+        self.current_audio_dir = ""  # 音频文件所在目录
         
         self.step_status = [False] * 6
+
+        # 训练进程管理
+        self.training_process = None  # 当前训练进程
+        self.is_training = False  # 训练状态标志
+
+        # 保存默认参数值用于重置
+        self.default_params = {
+            'batch_size': 1,
+            'num_workers': 0,
+            'tag_dropout': 0.5,
+            'learning_rate': "1e-4",
+            'max_steps': 2000,
+            'precision': "bf16-mixed",
+            'save_steps': 100
+        }
 
         self.init_ui()
 
@@ -90,14 +109,19 @@ class ACEStepGUI(QWidget):
 
         layout.addLayout(buttons_layout)
 
-        # TensorBoard & Reset
+        # TensorBoard & Reset & Stop Training
         extra_layout = QHBoxLayout()
         self.tensorboard_btn = QPushButton("启动 TensorBoard")
         self.tensorboard_btn.clicked.connect(self.start_tensorboard)
         self.reset_btn = QPushButton("重置")
         self.reset_btn.clicked.connect(self.reset_all)
+        self.stop_training_btn = QPushButton("停止训练")
+        self.stop_training_btn.clicked.connect(self.stop_training)
+        self.stop_training_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; }")
+        self.stop_training_btn.setEnabled(False)  # 默认禁用
         extra_layout.addWidget(self.tensorboard_btn)
         extra_layout.addWidget(self.reset_btn)
+        extra_layout.addWidget(self.stop_training_btn)
         layout.addLayout(extra_layout)
 
         # 训练参数设置
@@ -105,36 +129,59 @@ class ACEStepGUI(QWidget):
         param_layout = QFormLayout()
 
         self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setValue(1)
+        self.batch_size_spin.setValue(self.default_params['batch_size'])
         param_layout.addRow(QLabel("Batch Size"), self.batch_size_spin)
 
         self.num_workers_spin = QSpinBox()
-        self.num_workers_spin.setValue(0)
+        self.num_workers_spin.setValue(self.default_params['num_workers'])
         param_layout.addRow(QLabel("Num Workers"), self.num_workers_spin)
 
         self.tag_dropout_spin = QDoubleSpinBox()
         self.tag_dropout_spin.setRange(0.0, 1.0)
         self.tag_dropout_spin.setSingleStep(0.1)
-        self.tag_dropout_spin.setValue(0.5)
+        self.tag_dropout_spin.setValue(self.default_params['tag_dropout'])
         param_layout.addRow(QLabel("Tag Dropout"), self.tag_dropout_spin)
 
-        self.learning_rate_edit = QLineEdit("1e-4")
+        self.learning_rate_edit = QLineEdit(self.default_params['learning_rate'])
         param_layout.addRow(QLabel("Learning Rate"), self.learning_rate_edit)
 
         self.max_steps_spin = QSpinBox()
         self.max_steps_spin.setMaximum(100000)
-        self.max_steps_spin.setValue(2000)
+        self.max_steps_spin.setValue(self.default_params['max_steps'])
         param_layout.addRow(QLabel("Max Steps"), self.max_steps_spin)
 
-        self.precision_edit = QLineEdit("bf16-mixed")
+        self.precision_edit = QLineEdit(self.default_params['precision'])
         param_layout.addRow(QLabel("Precision"), self.precision_edit)
 
         self.save_steps_spin = QSpinBox()
-        self.save_steps_spin.setValue(100)
+        self.save_steps_spin.setValue(self.default_params['save_steps'])
         param_layout.addRow(QLabel("Save Every N Steps"), self.save_steps_spin)
 
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
+
+        # 内容显示区域
+        content_group = QGroupBox("生成内容预览")
+        content_layout = QHBoxLayout()
+        
+        # 提示词显示
+        prompt_layout = QVBoxLayout()
+        prompt_layout.addWidget(QLabel("提示词内容:"))
+        self.prompt_display = QTextBrowser()
+        self.prompt_display.setMaximumHeight(150)
+        prompt_layout.addWidget(self.prompt_display)
+        content_layout.addLayout(prompt_layout)
+        
+        # 歌词显示
+        lyric_layout = QVBoxLayout()
+        lyric_layout.addWidget(QLabel("歌词内容:"))
+        self.lyric_display = QTextBrowser()
+        self.lyric_display.setMaximumHeight(150)
+        lyric_layout.addWidget(self.lyric_display)
+        content_layout.addLayout(lyric_layout)
+        
+        content_group.setLayout(content_layout)
+        layout.addWidget(content_group)
 
         # 日志区域
         self.log_area = QTextEdit()
@@ -237,6 +284,7 @@ class ACEStepGUI(QWidget):
                 shutil.copy2(file_path, target_file_path)
                 self.current_audio_name = safe_name
                 self.current_audio_full_path = target_file_path
+                self.current_audio_dir = target_dir
                 
                 self.audio_file_label.setText(f"训练音频文件：{original_filename} -> {safe_name}{file_ext}")
                 self.log(f"音频文件已上传到: {target_file_path}")
@@ -280,6 +328,7 @@ class ACEStepGUI(QWidget):
             output_dir = audio_dir_with_name + "_prep"
             cmd = f'python preprocess_dataset_new.py --input_name "{input_name}" --output_dir "{output_dir}"'
         elif step_index == 4:
+            # 开始训练步骤
             dataset_path = audio_dir_with_name + "_prep"
             cmd = (
                 f'python trainer_new.py '
@@ -292,41 +341,227 @@ class ACEStepGUI(QWidget):
                 f'--precision "{self.precision_edit.text()}" '
                 f'--save_every_n_train_steps {self.save_steps_spin.value()}'
             )
+            
+            # 启用停止训练按钮
+            self.is_training = True
+            self.stop_training_btn.setEnabled(True)
+            self.step_buttons[step_index].setText("训练中...")
 
-        self.worker_thread = WorkerThread(cmd, cwd)
-        self.worker_thread.output.connect(self.log)
-        self.worker_thread.error.connect(self.log)
-        self.worker_thread.finished.connect(lambda: self.on_step_finished(step_index))
-        self.worker_thread.start()
+        # 对于非训练步骤，使用WorkerThread
+        if step_index != 4:
+            self.worker_thread = WorkerThread(cmd, cwd)
+            self.worker_thread.output.connect(self.log)
+            self.worker_thread.error.connect(self.log)
+            self.worker_thread.finished.connect(lambda: self.on_step_finished(step_index))
+            self.worker_thread.start()
+        else:
+            # 训练步骤使用单独的处理
+            self.start_training(cmd, cwd, step_index)
+
+    def start_training(self, cmd, cwd, step_index):
+        """开始训练"""
+        try:
+            self.log("开始训练...")
+            self.log(f"执行命令: {cmd}")
+
+            # 启动训练进程
+            self.training_process = subprocess.Popen(
+                cmd, 
+                shell=True, 
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            # 启动线程监控训练输出
+            self.monitor_training(step_index)
+
+        except Exception as e:
+            self.log(f"启动训练时发生异常: {str(e)}")
+            self.on_training_finished(step_index)
+
+    def monitor_training(self, step_index):
+        """监控训练输出"""
+        def read_output():
+            try:
+                while self.training_process and self.training_process.poll() is None:
+                    output = self.training_process.stdout.readline()
+                    if output:
+                        self.log(output.strip())
+                
+                # 读取剩余输出
+                if self.training_process:
+                    stdout, stderr = self.training_process.communicate()
+                    if stdout:
+                        self.log(stdout)
+                    if stderr:
+                        self.log(f"错误: {stderr}")
+                    
+                    # 训练完成后处理
+                    if self.training_process.returncode == 0:
+                        self.log("训练完成！")
+                        self.process_lora_alpha()
+                    else:
+                        self.log(f"训练异常结束，返回码: {self.training_process.returncode}")
+                    
+                self.on_training_finished(step_index)
+            except Exception as e:
+                self.log(f"监控训练输出时发生异常: {str(e)}")
+                self.on_training_finished(step_index)
+
+        # 在新线程中监控输出
+        threading.Thread(target=read_output, daemon=True).start()
+
+    def stop_training(self):
+        """停止训练"""
+        try:
+            if self.training_process and self.training_process.poll() is None:
+                self.log("正在停止训练...")
+                # 终止进程
+                self.training_process.terminate()
+                try:
+                    # 等待进程结束，最多等待10秒
+                    self.training_process.wait(timeout=10)
+                    self.log("训练已停止")
+                except subprocess.TimeoutExpired:
+                    # 如果进程没有响应，强制杀死
+                    self.training_process.kill()
+                    self.log("训练已强制停止")
+                self.training_process = None
+            else:
+                self.log("当前没有正在运行的训练任务")
+        except Exception as e:
+            self.log(f"停止训练时发生异常: {str(e)}")
+        finally:
+            self.is_training = False
+            self.stop_training_btn.setEnabled(False)
+            self.step_buttons[4].setText("5. 开始训练")
+            self.step_buttons[4].setEnabled(True)
+
+    def on_training_finished(self, step_index):
+        """训练完成后的处理"""
+        self.training_process = None
+        self.is_training = False
+        self.stop_training_btn.setEnabled(False)
+        self.step_buttons[4].setText("5. 开始训练")
+        self.on_step_finished(step_index)
 
     def on_step_finished(self, step_index):
         self.step_status[step_index] = True
         self.log(f"步骤 {step_index + 1} 完成。")
 
-        # 如果是训练完成（第5步）
-        if step_index == 4:
-            self.process_lora_alpha()
+        # 步骤1完成后显示提示词
+        if step_index == 0:
+            self.display_prompts()
+        # 步骤2完成后显示歌词
+        elif step_index == 1:
+            self.display_lyrics()
 
         if step_index < 4:
             self.step_buttons[step_index + 1].setEnabled(True)
 
+    def display_prompts(self):
+        """显示生成的提示词内容"""
+        try:
+            # 修正文件路径，使用正确的命名格式
+            prompts_file = os.path.join(self.current_audio_dir, f"{self.current_audio_name}_prompt.txt")
+            if os.path.exists(prompts_file):
+                with open(prompts_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    self.prompt_display.setPlainText(content)
+            else:
+                self.prompt_display.setPlainText("未找到提示词文件")
+        except Exception as e:
+            self.prompt_display.setPlainText(f"读取提示词文件失败: {str(e)}")
+
+    def display_lyrics(self):
+        """显示生成的歌词内容"""
+        try:
+            # 修正文件路径，使用正确的命名格式
+            lyrics_file = os.path.join(self.current_audio_dir, f"{self.current_audio_name}_lyrics.txt")
+            if os.path.exists(lyrics_file):
+                with open(lyrics_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    self.lyric_display.setPlainText(content)
+            else:
+                self.lyric_display.setPlainText("未找到歌词文件")
+        except Exception as e:
+            self.lyric_display.setPlainText(f"读取歌词文件失败: {str(e)}")
 
     def start_tensorboard(self):
         try:
-            subprocess.Popen(["tensorboard", "--logdir", "tb_logs"])
+            # 检查是否有训练日志
+            tb_logs_dir = "tb_logs"
+            if not os.path.exists(tb_logs_dir):
+                self.log("TensorBoard日志目录不存在，请先开始训练以生成日志文件。")
+                return
+                
+            # 检查目录是否为空
+            if not os.listdir(tb_logs_dir):
+                self.log("TensorBoard日志目录为空，请先开始训练以生成日志文件。")
+                return
+                
+            subprocess.Popen(["tensorboard", "--logdir", tb_logs_dir])
             webbrowser.open("http://localhost:6006")
+            self.log("TensorBoard已启动，请在浏览器中查看 http://localhost:6006")
         except Exception as e:
             self.log(f"启动 TensorBoard 失败: {e}")
 
     def reset_all(self):
+        # 重置参数到默认值
+        self.batch_size_spin.setValue(self.default_params['batch_size'])
+        self.num_workers_spin.setValue(self.default_params['num_workers'])
+        self.tag_dropout_spin.setValue(self.default_params['tag_dropout'])
+        self.learning_rate_edit.setText(self.default_params['learning_rate'])
+        self.max_steps_spin.setValue(self.default_params['max_steps'])
+        self.precision_edit.setText(self.default_params['precision'])
+        self.save_steps_spin.setValue(self.default_params['save_steps'])
+        
+        # 清空内容显示
+        self.prompt_display.clear()
+        self.lyric_display.clear()
+        
+        # 如果有上传的音频文件，删除相关目录
+        if self.current_audio_name and self.current_audio_dir:
+            try:
+                # 删除音频文件目录
+                if os.path.exists(self.current_audio_dir):
+                    shutil.rmtree(self.current_audio_dir)
+                    self.log(f"已删除音频目录: {self.current_audio_dir}")
+                
+                # 删除相关生成目录
+                related_dirs = [
+                    self.current_audio_dir + "_filenames",
+                    self.current_audio_dir + "_prep"
+                ]
+                
+                for dir_path in related_dirs:
+                    if os.path.exists(dir_path):
+                        shutil.rmtree(dir_path)
+                        self.log(f"已删除相关目录: {dir_path}")
+                
+                # 删除checkpoints目录（如果存在）
+                checkpoints_dir = os.path.join(os.path.dirname(self.current_audio_dir), "checkpoints")
+                if os.path.exists(checkpoints_dir):
+                    shutil.rmtree(checkpoints_dir)
+                    self.log(f"已删除checkpoints目录: {checkpoints_dir}")
+                    
+            except Exception as e:
+                self.log(f"删除文件时出错: {str(e)}")
+        
+        # 重置所有状态
         self.current_audio_name = ""
         self.current_audio_full_path = ""
+        self.current_audio_dir = ""
         self.step_status = [False] * 6
         self.audio_file_label.setText("训练音频文件：未选择")
         for btn in self.step_buttons:
             btn.setEnabled(False)
         self.log_area.clear()
-        self.log("已重置所有设置。")
+        self.log("已重置所有设置和文件。")
 
     def process_lora_alpha(self):
         """训练完成后自动处理 LoRA 权重"""
@@ -336,28 +571,25 @@ class ACEStepGUI(QWidget):
             checkpoint_dir = os.path.join(os.path.dirname(dataset_path), "checkpoints")
 
             if not os.path.exists(checkpoint_dir):
-                self.log("未找到 checkpoints 目录，跳过 LoRA alpha 处理。")
+                self.log("未找到任何 epoch-step 目录，跳过 LoRA alpha 处理。")
                 return
 
-            # 查找最新的 step 文件夹
-            step_dirs = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch=") and os.path.isdir(os.path.join(checkpoint_dir, d))]
+            # 获取所有 step 目录
+            step_dirs = [d for d in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, d)) and "step=" in d]
             if not step_dirs:
                 self.log("未找到任何 epoch-step 目录，跳过 LoRA alpha 处理。")
                 return
 
+            # 找到最新的 step 目录
             latest_dir = sorted(step_dirs, key=lambda x: int(x.split("step=")[-1].split("_")[0]))[-1]
             lora_dir = os.path.join(checkpoint_dir, latest_dir)
             input_lora_path = os.path.join(lora_dir, "pytorch_lora_weights.safetensors")
+            output_lora_path = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
+            lora_config_path = os.path.join(lora_dir, "lora_config.json")
 
             if not os.path.exists(input_lora_path):
-                self.log(f"未找到 LoRA 文件: {input_lora_path}")
+                self.log(f"未找到 LoRA 权重文件: {input_lora_path}")
                 return
-
-            # 输出文件路径
-            output_lora_path = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
-
-            # 配置文件路径（假设 config 文件在项目根目录）
-            lora_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "lora_config_transformer_only.json")
 
             if not os.path.exists(lora_config_path):
                 self.log(f"未找到 LoRA 配置文件: {lora_config_path}")
@@ -385,8 +617,10 @@ class ACEStepGUI(QWidget):
         except Exception as e:
             self.log(f"处理 LoRA alpha 时发生异常: {str(e)}")
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = ACEStepGUI()
     window.show()
     sys.exit(app.exec())
+
