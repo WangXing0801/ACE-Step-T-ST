@@ -37,6 +37,8 @@ python trainer_new.py --dataset_path D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\1_prep 
 
 ！！！请注意使时权重调整，如果默认用我的方式训练，使用时权重请设置在0.125，>=0.2会噪音满满！！！
 <img width="1889" height="880" alt="image" src="https://github.com/user-attachments/assets/e08b1744-2c7e-4cc9-ae7a-7a50d57e66b8" />
+训练好的lora文件夹名称可以更改
+<img width="904" height="407" alt="image" src="https://github.com/user-attachments/assets/44fc710e-8d06-4dab-86b8-8aa23970e89d" />
 
 
 gui要求底部要有日志框，以上步骤按序号顺序执行，没有执行完上一步骤不可以进行下一步。
