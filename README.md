@@ -10,37 +10,19 @@
 
 # ACE-Step 模型训练操作流程文档
 
-## 📋 训练准备阶段
+## 📋 使用方法：
 
-### 1. 准备音频数据 (gui要求，用户可以上传音频文件，如果音频文件是中文名自动转成拼音，字符不要太长，做到避免文件名重复就行。如果同一个文件夹下已经存在音频文件，则给出提示换一个文件夹或者清空当前文件夹，音频文件放在下面示例文件夹里，下面的xxx都代表音频文件的确定后的名字，确定存放目录后，用户是可以手动修改的)
-- 收集训练用的音频文件
-- 将音频文件存放至指定目录（示例：`D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx`）
+### 1. 上传音频文件
 
-### 2. 生成提示词 (gui要求，这里是按钮，点击生成提示词，等待模型运行完可以有个文本框显示提示词进行浏览和更改)
-```powershell
-python generate_prompts_lyrics.py --data_dir D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx
+### 2. 生成提示词 
+
+### 3. 生成歌词 
 ```
+### 4. 创建文件名数据集 
 
-### 3. 生成歌词 (gui要求，这里是按钮，点击生成歌词，等待模型运行完可以有个文本框显示提示词进行浏览和更改)
-```powershell
-python generate_prompts_lyrics.py --data_dir D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx --lyrics
-```
-### 4. 创建文件名数据集 (gui要求，这里也是按钮，创建数据集)
-```powershell
-python convert2hf_dataset_new.py --data_dir D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx --output_name D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx_filenames
-```
+### 5. 音频预处理 
 
-### 5. 音频预处理 (gui要求，这里也是按钮，音频预处理)
-```powershell
-python preprocess_dataset_new.py --input_name D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx_filenames --output_dir D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\xxx_prep
-```
-
-## 🏋️ 训练执行阶段 
-
-### 6. 开始训练 (gui要求，这里也是按钮，开始训练)
-```powershell
-python trainer_new.py --dataset_path D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\音频文件名文件夹_prep
-```
+### 6. 开始训练 
 
 注意：当前gui有bug，从第3步开始不知道为什么会有重复训练的问题，目前没解决。3，4，5步骤不影响什么，但是第6步开始训练影响严重。可以暂时先用下面指令使用训练！我是懒得改了，哪位大神改好后麻烦告诉小弟一下~~~
 
