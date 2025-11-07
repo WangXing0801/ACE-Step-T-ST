@@ -43,11 +43,8 @@ python trainer_new.py --dataset_path D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\1_prep 
 
 
 
-gui要求底部要有日志框，以上步骤按序号顺序执行，没有执行完上一步骤不可以进行下一步。
-增加启动 TensorBoardLogger 功能按钮，启动后使用默认浏览器自动打开对应网站。
-增加一个重置按钮，可以恢复所有默认设置。
-以上提到的py文件和这个gui文件在同一个目录平级。
-增加训练模型参数设置
+
+训练模型参数设置
 --batch_size	1	批大小
 --num_workers	0	DataLoader 使用的线程数
 --tag_dropout	0.5	文本标签的 dropout 概率
@@ -55,7 +52,6 @@ gui要求底部要有日志框，以上步骤按序号顺序执行，没有执�
 --max_steps	2000	最大训练步数
 --precision	"bf16-mixed"	混合精度训练设置
 --save_every_n_train_steps	100	每多少步保存一次检查点
-以上内容参照我下面发给你的模型训练文件一起完成gui文件
 
 
 
