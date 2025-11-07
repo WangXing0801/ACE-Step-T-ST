@@ -3,780 +3,512 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QPushButton, QFileDialog, QTextEdit,
-    QVBoxLayout, QHBoxLayout, QLineEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
-    QFormLayout, QMessageBox, QTextBrowser
-)
-from PySide6.QtCore import Qt, QThread, Signal
-import webbrowser
 import re
-import json
-import threading
 
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QTextEdit, QFileDialog, QLineEdit, QFormLayout, QMessageBox, QGroupBox, QGridLayout
+)
+from PyQt5.QtCore import QProcess, Qt, QProcessEnvironment, QByteArray
+from PyQt5.QtGui import QFont
 
+# 默认参数配置
+DEFAULT_PARAMS = {
+    'batch_size': 4,
+    'num_workers': 0,
+    'tag_dropout': 0.5,
+    'learning_rate': 1e-4,
+    'max_steps': 2000,
+    'precision': "bf16-mixed",
+    'save_every_n_train_steps': 100,
+}
 
-class WorkerThread(QThread):
-    output = Signal(str)
-    error = Signal(str)
-    finished = Signal()
-
-    def __init__(self, command, cwd=None):
-        super().__init__()
-        self.command = command
-        self.cwd = cwd
-
-    def run(self):
-        try:
-            process = subprocess.Popen(
-                self.command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                shell=True,
-                cwd=self.cwd
-            )
-            for line in process.stdout:
-                self.output.emit(line.strip())
-            process.wait()
-            if process.returncode == 0:
-                self.finished.emit()
-            else:
-                self.error.emit("命令执行失败")
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class ACEStepGUI(QWidget):
+class ACEStepTrainerGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ACE-Step 模型训练 GUI")
-        self.resize(1000, 800)
+        self.setGeometry(100, 100, 1100, 800)
+        self.base_dir = Path(__file__).parent.resolve()
+        self.audio_name = ""
+        self.audio_folder = ""
+        self.params = DEFAULT_PARAMS.copy()
+        self.initUI()
+        self.setupReset()
+        self.check_python_environment()
 
-        # 基础目录
-        self.base_audio_dir = r"D:\AIJOB\ACE-Step-T\ACE-Step\Taudio"
-        self.current_audio_name = ""  # 不带扩展名的文件名
-        self.current_audio_full_path = ""  # 完整路径
-        self.current_audio_dir = ""  # 音频文件所在目录
+    def initUI(self):
+        main_layout = QVBoxLayout()
         
-        self.step_status = [False] * 6
+        # 标题
+        title_label = QLabel("ACE-Step 模型训练操作面板    by 圣天制作")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title_label)
 
-        # 训练进程管理
-        self.training_process = None  # 当前训练进程
-        self.is_training = False  # 训练状态标志
-
-        # 保存默认参数值用于重置
-        self.default_params = {
-            'batch_size': 1,
-            'num_workers': 0,
-            'tag_dropout': 0.5,
-            'learning_rate': "1e-4",
-            'max_steps': 2000,
-            'precision': "bf16-mixed",
-            'save_steps': 100
-        }
-
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout()
-
-        # 上传音频文件
-        self.audio_file_label = QLabel("训练音频文件：未选择")
-        self.upload_audio_btn = QPushButton("上传音频文件")
-        self.upload_audio_btn.clicked.connect(self.upload_audio_file)
-
-        layout.addWidget(self.audio_file_label)
-        layout.addWidget(self.upload_audio_btn)
-
-        # 按钮区域
-        buttons_layout = QHBoxLayout()
-        self.step_buttons = []
-
-        step_names = [
-            "1. 生成提示词",
-            "2. 生成歌词",
-            "3. 创建文件名数据集",
-            "4. 音频预处理",
-            "5. 开始训练"
-        ]
-        for i, name in enumerate(step_names):
-            btn = QPushButton(name)
-            btn.clicked.connect(lambda _, idx=i: self.run_step(idx))
-            btn.setEnabled(False)
-            buttons_layout.addWidget(btn)
-            self.step_buttons.append(btn)
-
-        layout.addLayout(buttons_layout)
-
-        # TensorBoard & Reset & Stop Training
-        extra_layout = QHBoxLayout()
-        self.tensorboard_btn = QPushButton("启动 TensorBoard")
-        self.tensorboard_btn.clicked.connect(self.start_tensorboard)
-        self.reset_btn = QPushButton("重置")
-        self.reset_btn.clicked.connect(self.reset_all)
-        self.stop_training_btn = QPushButton("停止训练")
-        self.stop_training_btn.clicked.connect(self.stop_training)
-        self.stop_training_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; }")
-        self.stop_training_btn.setEnabled(False)  # 默认禁用
-        extra_layout.addWidget(self.tensorboard_btn)
-        extra_layout.addWidget(self.reset_btn)
-        extra_layout.addWidget(self.stop_training_btn)
-        layout.addLayout(extra_layout)
-
-        # 训练参数设置
-        param_group = QGroupBox("训练参数设置")
-        param_layout = QFormLayout()
-
-        self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setValue(self.default_params['batch_size'])
-        param_layout.addRow(QLabel("Batch Size"), self.batch_size_spin)
-
-        self.num_workers_spin = QSpinBox()
-        self.num_workers_spin.setValue(self.default_params['num_workers'])
-        param_layout.addRow(QLabel("Num Workers"), self.num_workers_spin)
-
-        self.tag_dropout_spin = QDoubleSpinBox()
-        self.tag_dropout_spin.setRange(0.0, 1.0)
-        self.tag_dropout_spin.setSingleStep(0.1)
-        self.tag_dropout_spin.setValue(self.default_params['tag_dropout'])
-        param_layout.addRow(QLabel("Tag Dropout"), self.tag_dropout_spin)
-
-        self.learning_rate_edit = QLineEdit(self.default_params['learning_rate'])
-        param_layout.addRow(QLabel("Learning Rate"), self.learning_rate_edit)
-
-        self.max_steps_spin = QSpinBox()
-        self.max_steps_spin.setMaximum(100000)
-        self.max_steps_spin.setValue(self.default_params['max_steps'])
-        param_layout.addRow(QLabel("Max Steps"), self.max_steps_spin)
-
-        self.precision_edit = QLineEdit(self.default_params['precision'])
-        param_layout.addRow(QLabel("Precision"), self.precision_edit)
-
-        self.save_steps_spin = QSpinBox()
-        self.save_steps_spin.setValue(self.default_params['save_steps'])
-        param_layout.addRow(QLabel("Save Every N Steps"), self.save_steps_spin)
-
-        param_group.setLayout(param_layout)
-        layout.addWidget(param_group)
-
-        # 内容显示区域
-        content_group = QGroupBox("生成内容预览")
+        # 创建主内容布局
         content_layout = QHBoxLayout()
         
-        # 提示词显示
+        # 左侧控制面板
+        left_panel = QVBoxLayout()
+        
+        # 训练准备阶段
+        prep_group = QGroupBox("📋 训练准备阶段")
+        prep_layout = QGridLayout()
+        
+        # 按钮样式
+        button_style = """
+            QPushButton {
+                padding: 8px;
+                font-weight: bold;
+            }
+        """
+        
+        self.upload_btn = QPushButton("1. 上传音频文件")
+        self.upload_btn.setStyleSheet(button_style)
+        self.upload_btn.clicked.connect(self.upload_audio)
+        prep_layout.addWidget(self.upload_btn, 0, 0, 1, 2)
+
+        self.gen_prompt_btn = QPushButton("2. 生成提示词")
+        self.gen_prompt_btn.setStyleSheet(button_style)
+        self.gen_prompt_btn.clicked.connect(self.generate_prompt)
+        prep_layout.addWidget(self.gen_prompt_btn, 1, 0)
+
+        self.gen_lyrics_btn = QPushButton("3. 生成歌词")
+        self.gen_lyrics_btn.setStyleSheet(button_style)
+        self.gen_lyrics_btn.clicked.connect(self.generate_lyrics)
+        prep_layout.addWidget(self.gen_lyrics_btn, 1, 1)
+
+        self.create_dataset_btn = QPushButton("4. 创建文件名数据集")
+        self.create_dataset_btn.setStyleSheet(button_style)
+        self.create_dataset_btn.clicked.connect(self.create_dataset)
+        prep_layout.addWidget(self.create_dataset_btn, 2, 0)
+
+        self.preprocess_btn = QPushButton("5. 音频预处理")
+        self.preprocess_btn.setStyleSheet(button_style)
+        self.preprocess_btn.clicked.connect(self.preprocess_audio)
+        prep_layout.addWidget(self.preprocess_btn, 2, 1)
+
+        prep_group.setLayout(prep_layout)
+        left_panel.addWidget(prep_group)
+
+        # 训练执行阶段
+        train_group = QGroupBox("🏋️ 训练执行阶段")
+        train_layout = QVBoxLayout()
+        
+        self.train_btn = QPushButton("6. 开始训练")
+        self.train_btn.setStyleSheet(button_style)
+        self.train_btn.clicked.connect(self.start_training)
+        train_layout.addWidget(self.train_btn)
+        
+        train_group.setLayout(train_layout)
+        left_panel.addWidget(train_group)
+
+        # 工具按钮区域
+        tools_group = QGroupBox("🛠️ 工具")
+        tools_layout = QHBoxLayout()
+        
+        self.tensorboard_btn = QPushButton("启动 TensorBoard")
+        self.tensorboard_btn.clicked.connect(self.start_tensorboard)
+        tools_layout.addWidget(self.tensorboard_btn)
+
+        self.reset_btn = QPushButton("重置所有")
+        self.reset_btn.clicked.connect(self.reset_all)
+        tools_layout.addWidget(self.reset_btn)
+        
+        tools_group.setLayout(tools_layout)
+        left_panel.addWidget(tools_group)
+
+        # 参数设置区域
+        form_layout = QFormLayout()
+        self.batch_size_edit = self.create_param_input(form_layout, 'batch_size')
+        self.num_workers_edit = self.create_param_input(form_layout, 'num_workers')
+        self.tag_dropout_edit = self.create_param_input(form_layout, 'tag_dropout')
+        self.learning_rate_edit = self.create_param_input(form_layout, 'learning_rate')
+        self.max_steps_edit = self.create_param_input(form_layout, 'max_steps')
+        self.precision_edit = self.create_param_input(form_layout, 'precision')
+        self.save_every_n_steps_edit = self.create_param_input(form_layout, 'save_every_n_train_steps')
+
+        params_group = QGroupBox("⚙️ 训练参数设置")
+        params_group.setLayout(form_layout)
+        left_panel.addWidget(params_group)
+        
+        # 添加弹簧以改善布局
+        left_panel.addStretch()
+
+        # 右侧显示区域
+        right_panel = QVBoxLayout()
+        
+        # 提示词和歌词显示区域
+        prompt_lyrics_layout = QHBoxLayout()
+        
+        # 提示词显示框
+        prompt_group = QGroupBox("📝 提示词内容 ({音频名}_prompt.txt)")
         prompt_layout = QVBoxLayout()
-        prompt_layout.addWidget(QLabel("提示词内容:"))
-        self.prompt_display = QTextBrowser()
-        self.prompt_display.setMaximumHeight(150)
+        self.prompt_display = QTextEdit()
+        self.prompt_display.setReadOnly(True)
         prompt_layout.addWidget(self.prompt_display)
-        content_layout.addLayout(prompt_layout)
+        prompt_group.setLayout(prompt_layout)
+        prompt_lyrics_layout.addWidget(prompt_group)
+
+        # 歌词显示框
+        lyrics_group = QGroupBox("🎵 歌词内容 ({音频名}_lyrics.txt)")
+        lyrics_layout = QVBoxLayout()
+        self.lyrics_display = QTextEdit()
+        self.lyrics_display.setReadOnly(True)
+        lyrics_layout.addWidget(self.lyrics_display)
+        lyrics_group.setLayout(lyrics_layout)
+        prompt_lyrics_layout.addWidget(lyrics_group)
         
-        # 歌词显示
-        lyric_layout = QVBoxLayout()
-        lyric_layout.addWidget(QLabel("歌词内容:"))
-        self.lyric_display = QTextBrowser()
-        self.lyric_display.setMaximumHeight(150)
-        lyric_layout.addWidget(self.lyric_display)
-        content_layout.addLayout(lyric_layout)
+        right_panel.addLayout(prompt_lyrics_layout)
+
+        # 日志框
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        log_group = QGroupBox("📋 运行日志")
+        log_layout = QVBoxLayout()
+        log_layout.addWidget(self.log_box)
+        log_group.setLayout(log_layout)
+        right_panel.addWidget(log_group)
+
+        # 设置左右面板比例
+        content_layout.addLayout(left_panel, 1)
+        content_layout.addLayout(right_panel, 2)
         
-        content_group.setLayout(content_layout)
-        layout.addWidget(content_group)
+        main_layout.addLayout(content_layout)
+        self.setLayout(main_layout)
 
-        # 日志区域
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
-        layout.addWidget(self.log_area)
+    def create_param_input(self, layout, key):
+        line_edit = QLineEdit(str(self.params[key]))
+        line_edit.setObjectName(key)
+        layout.addRow(QLabel(f"{key}:"), line_edit)
+        return line_edit
 
-        self.setLayout(layout)
+    def setupReset(self):
+        self.reset_values = {k: v for k, v in self.params.items()}
 
-    def log(self, text):
-        self.log_area.append(text)
-
-    def chinese_to_pinyin_initials(self, text):
-        """中文转拼音首字母"""
-        pinyin_map = {
-            '张': 'z', '雨': 'y', '生': 's', '一': 'y', '天': 't', 
-            '到': 'd', '晚': 'w', '游': 'y', '泳': 'y', '的': 'd', '鱼': 'y',
-            '二': 'e', '三': 's', '四': 's', '五': 'w', '六': 'l', '七': 'q', '八': 'b', '九': 'j', '十': 's',
-            '是': 's', '我': 'w', '你': 'n', '他': 't', '她': 't', '它': 't', '们': 'm',
-            '好': 'h', '很': 'h', '了': 'l', '么': 'm', '呢': 'n', '吧': 'b', '啊': 'a',
-            '爱': 'a', '情': 'q', '心': 'x', '梦': 'm', '想': 'x', '希': 'x', '望': 'w',
-            '快': 'k', '乐': 'l', '悲': 'b', '伤': 's', '高': 'g', '兴': 'x',
-            '美': 'm', '丽': 'l', '漂': 'p', '亮': 'l', '聪': 'c', '明': 'm',
-            '大': 'd', '小': 'x', '中': 'z', '上': 's', '下': 'x', '左': 'z', '右': 'y',
-            '前': 'q', '后': 'h', '里': 'l', '外': 'w', '内': 'n', '东': 'd', '西': 'x', '南': 'n', '北': 'b'
-        }
-        
-        result = ""
-        for char in text:
-            if char in pinyin_map:
-                result += pinyin_map[char]
-            elif char.isalnum():
-                result += char.lower()
-            # 跳过空格和特殊符号
-        
-        return result
-
-    def get_safe_filename(self, original_name):
-        """获取安全的文件名（10字符以内，完全英文数字）"""
-        # 去掉扩展名
-        name_without_ext = os.path.splitext(original_name)[0]
-        
-        # 移除艺术家信息（通常在 - 前面）
-        if ' - ' in name_without_ext:
-            name_without_ext = name_without_ext.split(' - ')[-1]
-        
-        # 如果包含中文，转换为拼音首字母
-        if re.search(r'[\u4e00-\u9fff]', name_without_ext):
-            safe_name = self.chinese_to_pinyin_initials(name_without_ext)
-        else:
-            # 英文名也做清理处理
-            safe_name = name_without_ext.lower()
-        
-        # 只保留字母和数字
-        safe_name = re.sub(r'[^a-z0-9]', '', safe_name)
-        
-        # 限制长度为10个字符
-        if len(safe_name) > 10:
-            safe_name = safe_name[:10]
-        elif len(safe_name) == 0:
-            safe_name = "audio"
-            
-        return safe_name
-
-    def upload_audio_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "选择音频文件", 
-            "", 
-            "Audio Files (*.mp3 *.wav *.flac *.m4a *.aac)"
-        )
-        
-        if file_path:
-            original_filename = os.path.basename(file_path)
-            safe_name = self.get_safe_filename(original_filename)
-            
-            # 创建目标目录
-            target_dir = os.path.join(self.base_audio_dir, safe_name)
-            
-            # 检查目录是否存在
-            if os.path.exists(target_dir):
-                reply = QMessageBox.question(
-                    self,
-                    "确认",
-                    f"目录 {target_dir} 已存在，是否清空并继续？",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
-                    return
-                else:
-                    shutil.rmtree(target_dir)
-            
-            os.makedirs(target_dir, exist_ok=True)
-            
-            # 目标文件路径
-            file_ext = os.path.splitext(original_filename)[1]
-            target_file_path = os.path.join(target_dir, safe_name + file_ext)
-            
-            # 复制文件
-            try:
-                shutil.copy2(file_path, target_file_path)
-                self.current_audio_name = safe_name
-                self.current_audio_full_path = target_file_path
-                self.current_audio_dir = target_dir
-                
-                self.audio_file_label.setText(f"训练音频文件：{original_filename} -> {safe_name}{file_ext}")
-                self.log(f"音频文件已上传到: {target_file_path}")
-                
-                # 启用后续步骤按钮
-                self.update_step_buttons()
-                
-            except Exception as e:
-                self.log(f"文件上传失败: {str(e)}")
-                QMessageBox.critical(self, "错误", f"文件上传失败: {str(e)}")
-
-    def update_step_buttons(self):
-        for i in range(5):
-            self.step_buttons[i].setEnabled(True)
-
-    def run_step(self, step_index):
-        if step_index > 0 and not self.step_status[step_index - 1]:
-            self.log("请按顺序执行步骤！")
-            return
-
-        if not self.current_audio_name:
-            self.log("请先上传音频文件！")
-            return
-
-        self.step_buttons[step_index].setEnabled(False)
-        self.log(f"开始执行步骤 {step_index + 1}...")
-
-        cmd = ""
-        cwd = os.path.dirname(os.path.abspath(__file__))
-        audio_dir_with_name = os.path.join(self.base_audio_dir, self.current_audio_name)
-
-        if step_index == 0:
-            cmd = f'python generate_prompts_lyrics.py --data_dir "{audio_dir_with_name}"'
-        elif step_index == 1:
-            cmd = f'python generate_prompts_lyrics.py --data_dir "{audio_dir_with_name}" --lyrics'
-        elif step_index == 2:
-            output_name = audio_dir_with_name + "_filenames"
-            cmd = f'python convert2hf_dataset_new.py --data_dir "{audio_dir_with_name}" --output_name "{output_name}"'
-        elif step_index == 3:
-            input_name = audio_dir_with_name + "_filenames"
-            output_dir = audio_dir_with_name + "_prep"
-            cmd = f'python preprocess_dataset_new.py --input_name "{input_name}" --output_dir "{output_dir}"'
-        elif step_index == 4:
-            # 开始训练步骤
-            dataset_path = audio_dir_with_name + "_prep"
-            cmd = (
-                f'python trainer_new.py '
-                f'--dataset_path "{dataset_path}" '
-                f'--batch_size {self.batch_size_spin.value()} '
-                f'--num_workers {self.num_workers_spin.value()} '
-                f'--tag_dropout {self.tag_dropout_spin.value()} '
-                f'--learning_rate {self.learning_rate_edit.text()} '
-                f'--max_steps {self.max_steps_spin.value()} '
-                f'--precision "{self.precision_edit.text()}" '
-                f'--save_every_n_train_steps {self.save_steps_spin.value()}'
-            )
-            
-            # 在训练开始前检查并清空checkpoints文件夹
-            if not self.cleanup_checkpoints_before_training(audio_dir_with_name):
-                return  # 用户取消了操作
-            
-            # 启用停止训练按钮
-            self.is_training = True
-            self.stop_training_btn.setEnabled(True)
-            self.step_buttons[step_index].setText("训练中...")
-
-        # 对于非训练步骤，使用WorkerThread
-        if step_index != 4:
-            self.worker_thread = WorkerThread(cmd, cwd)
-            self.worker_thread.output.connect(self.log)
-            self.worker_thread.error.connect(self.log)
-            self.worker_thread.finished.connect(lambda: self.on_step_finished(step_index))
-            self.worker_thread.start()
-        else:
-            # 训练步骤使用单独的处理
-            self.start_training(cmd, cwd, step_index)
-
-    def cleanup_checkpoints_before_training(self, audio_dir_with_name):
-        """在训练开始前检查并清空checkpoints文件夹"""
+    def update_params(self):
         try:
-            checkpoint_dir = os.path.join(os.path.dirname(audio_dir_with_name), "checkpoints")
-            
-            # 如果checkpoints目录不存在，创建它
-            if not os.path.exists(checkpoint_dir):
-                os.makedirs(checkpoint_dir)
-                self.log(f"创建checkpoints目录: {checkpoint_dir}")
-                return
-            
-            # 如果目录存在但为空，直接返回
-            if not os.listdir(checkpoint_dir):
-                self.log("checkpoints目录为空，无需清理")
-                return
-            
-            # 目录不为空，询问用户是否清空
-            reply = QMessageBox.question(
-                self,
-                "确认",
-                f"checkpoints目录 {checkpoint_dir} 不为空，是否清空后继续训练？\n注意：清空后将丢失之前的训练进度！",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
-                # 清空目录
-                for item in os.listdir(checkpoint_dir):
-                    item_path = os.path.join(checkpoint_dir, item)
-                    if os.path.isfile(item_path):
-                        os.remove(item_path)
-                    elif os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                self.log(f"已清空checkpoints目录: {checkpoint_dir}")
-            else:
-                self.log("用户取消了训练操作")
-                # 重新启用训练按钮
-                self.step_buttons[4].setText("5. 开始训练")
-                self.step_buttons[4].setEnabled(True)
-                self.is_training = False
-                self.stop_training_btn.setEnabled(False)
-                return False
-                
-        except Exception as e:
-            self.log(f"清理checkpoints目录时发生错误: {str(e)}")
-            QMessageBox.critical(self, "错误", f"清理checkpoints目录时发生错误: {str(e)}")
-            # 重新启用训练按钮
-            self.step_buttons[4].setText("5. 开始训练")
-            self.step_buttons[4].setEnabled(True)
-            self.is_training = False
-            self.stop_training_btn.setEnabled(False)
+            self.params['batch_size'] = int(self.batch_size_edit.text())
+            self.params['num_workers'] = int(self.num_workers_edit.text())
+            self.params['tag_dropout'] = float(self.tag_dropout_edit.text())
+            self.params['learning_rate'] = float(self.learning_rate_edit.text())
+            self.params['max_steps'] = int(self.max_steps_edit.text())
+            self.params['precision'] = self.precision_edit.text()
+            self.params['save_every_n_train_steps'] = int(self.save_every_n_steps_edit.text())
+        except ValueError:
+            QMessageBox.warning(self, "参数错误", "请确保所有参数格式正确！")
             return False
-            
         return True
 
-
-    def start_training(self, cmd, cwd, step_index):
-        """开始训练"""
+    def log_output(self, output):
+        """处理命令行输出，兼容不同编码"""
         try:
-            self.log("开始训练...")
-            self.log(f"执行命令: {cmd}")
-
-            # 创建训练工作线程
-            self.training_thread = TrainingWorkerThread(cmd, cwd)
-            self.training_thread.output.connect(self.log)
-            self.training_thread.error.connect(self.log)
-            self.training_thread.finished.connect(lambda: self.on_training_finished(step_index))
-            self.training_thread.start()
-
+            # 如果是 QByteArray 对象，转换为 bytes
+            if isinstance(output, QByteArray):
+                byte_data = bytes(output)
+            else:
+                byte_data = output if isinstance(output, bytes) else str(output).encode('utf-8', errors='ignore')
+            
+            # 尝试多种编码解码
+            for encoding in ['utf-8', 'utf-16', 'gbk', 'gb2312']:
+                try:
+                    decoded_output = byte_data.decode(encoding)
+                    cleaned_output = decoded_output.strip()
+                    if cleaned_output:
+                        self.log_box.append(cleaned_output)
+                    return
+                except UnicodeDecodeError:
+                    continue
+            
+            # 如果都失败了，使用 ignore 模式
+            decoded_output = byte_data.decode('utf-8', errors='ignore')
+            cleaned_output = decoded_output.strip()
+            if cleaned_output:
+                self.log_box.append(cleaned_output)
+                
         except Exception as e:
-            self.log(f"启动训练时发生异常: {str(e)}")
-            self.on_training_finished(step_index)
+            # 最后的错误处理
+            self.log_box.append(f"[日志处理错误: {str(e)}]")
+
+    def handle_process_output(self, process):
+        """处理进程输出"""
+        output = process.readAllStandardOutput()
+        self.log_output(output)
+
+    def run_command(self, cmd, cwd=None):
+        """运行命令，确保使用当前 Python 环境"""
+        process = QProcess(self)
+        
+        # 设置环境变量确保正确编码
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONLEGACYWINDOWSFSENCODING", "1")
+        process.setProcessEnvironment(env)
+        
+        # 连接输出信号
+        process.readyReadStandardOutput.connect(lambda: self.handle_process_output(process))
+        process.readyReadStandardError.connect(lambda: self.handle_process_output(process))
+        
+        # 设置工作目录
+        if cwd:
+            process.setWorkingDirectory(str(cwd))
+        else:
+            process.setWorkingDirectory(str(self.base_dir))
+        
+        # 在命令前添加 chcp 设置代码页（处理中文）
+        full_cmd = f'chcp 65001 >nul & {cmd}'
+        
+        self.log_box.append(f"[调试] 执行命令: {full_cmd}")
+        
+        process.start("cmd.exe", ["/c", full_cmd])
+        if not process.waitForStarted():
+            self.log_box.append("❌ 命令启动失败")
+        return process
 
 
-    def monitor_training(self, step_index):
-        """监控训练输出"""
-        def read_output():
+
+    def upload_audio(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择音频文件", "", "Audio Files (*.mp3 *.wav *.flac)")
+        if not file_path:
+            return
+
+        original_name = os.path.basename(file_path)
+        name_without_ext = os.path.splitext(original_name)[0]
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '', name_without_ext)[:20] or 'audio'
+
+        self.audio_name = safe_name
+        self.audio_folder = self.base_dir / "Taudio" / self.audio_name
+        
+        # 如果文件夹已存在，先删除
+        if self.audio_folder.exists():
+            shutil.rmtree(self.audio_folder)
+            self.log_box.append(f"🗑️ 已删除已存在的文件夹: {self.audio_folder}")
+        
+        os.makedirs(self.audio_folder, exist_ok=True)
+
+        target_path = self.audio_folder / f"{self.audio_name}.mp3"
+        shutil.copy(file_path, target_path)
+        self.log_box.append(f"✅ 音频已上传并保存到: {target_path}")
+
+    def generate_prompt(self):
+        if not self.audio_name:
+            QMessageBox.warning(self, "错误", "请先上传音频文件")
+            return
+            
+        self.log_box.append("正在生成提示词...")
+        
+        # 清理可能已存在的提示词文件
+        prompt_file = self.audio_folder / f"{self.audio_name}_prompt.txt"
+        if prompt_file.exists():
+            prompt_file.unlink()
+            self.log_box.append(f"🗑️ 已删除已存在的提示词文件: {prompt_file}")
+        
+        # 不要给路径加引号，让 run_command 方法处理
+        cmd = f'python generate_prompts_lyrics.py --data_dir {self.audio_folder}'
+        process = self.run_command(cmd)
+        process.finished.connect(lambda exit_code, exit_status: self.handle_script_completion(
+            exit_code, exit_status, "提示词", prompt_file, self.display_prompt_content))
+
+    def generate_lyrics(self):
+        if not self.audio_name:
+            QMessageBox.warning(self, "错误", "请先上传音频文件")
+            return
+            
+        self.log_box.append("正在生成歌词...")
+        
+        # 清理可能已存在的歌词文件
+        lyrics_file = self.audio_folder / f"{self.audio_name}_lyrics.txt"
+        if lyrics_file.exists():
+            lyrics_file.unlink()
+            self.log_box.append(f"🗑️ 已删除已存在的歌词文件: {lyrics_file}")
+        
+        # 不要给路径加引号，让 run_command 方法处理
+        cmd = f'python generate_prompts_lyrics.py --data_dir {self.audio_folder} --lyrics'
+        process = self.run_command(cmd)
+        process.finished.connect(lambda exit_code, exit_status: self.handle_script_completion(
+            exit_code, exit_status, "歌词", lyrics_file, self.display_lyrics_content))
+
+    def handle_script_completion(self, exit_code, exit_status, script_type, file_path, display_func):
+        """处理脚本执行完成后的回调"""
+        if exit_code == 0:  # 成功执行
+            self.log_box.append(f"✅ {script_type}生成脚本执行完成")
+            display_func()
+        else:  # 执行失败
+            self.log_box.append(f"❌ {script_type}生成脚本执行失败 (退出码: {exit_code})")
+            self.log_box.append(f"💡 提示: 请检查是否安装了必要的依赖包")
+            # 添加 Python 环境检查信息
+            self.log_box.append(f"当前 Python: {sys.executable}")
             try:
-                while self.training_process and self.training_process.poll() is None:
-                    output = self.training_process.stdout.readline()
-                    if output:
-                        self.log(output.strip())
-                
-                # 读取剩余输出
-                if self.training_process:
-                    stdout, stderr = self.training_process.communicate()
-                    if stdout:
-                        self.log(stdout)
-                    if stderr:
-                        self.log(f"错误: {stderr}")
-                    
-                    # 训练完成后处理
-                    if self.training_process.returncode == 0:
-                        self.log("训练完成！")
-                        self.process_lora_alpha()
-                    else:
-                        self.log(f"训练异常结束，返回码: {self.training_process.returncode}")
-                    
-                self.on_training_finished(step_index)
-            except Exception as e:
-                self.log(f"监控训练输出时发生异常: {str(e)}")
-                self.on_training_finished(step_index)
+                import torch
+                self.log_box.append(f"PyTorch 已安装: {torch.__version__}")
+            except ImportError:
+                self.log_box.append("❌ PyTorch 未在当前环境中找到")
 
-        # 在新线程中监控输出
-        threading.Thread(target=read_output, daemon=True).start()
-
-    def stop_training(self):
-        """停止训练"""
-        try:
-            if hasattr(self, 'training_thread') and self.training_thread.isRunning():
-                self.log("正在停止训练...")
-                self.training_thread.stop()
-                self.training_thread.wait(5000)  # 等待最多5秒
-                if self.training_thread.isRunning():
-                    self.training_thread.terminate()
-                    self.training_thread.wait()
-                self.log("训练已停止")
-            else:
-                self.log("当前没有正在运行的训练任务")
-        except Exception as e:
-            self.log(f"停止训练时发生异常: {str(e)}")
-        finally:
-            self.is_training = False
-            self.stop_training_btn.setEnabled(False)
-            self.step_buttons[4].setText("5. 开始训练")
-            self.step_buttons[4].setEnabled(True)
-
-    def on_training_finished(self, step_index):
-        """训练完成后的处理"""
-        self.training_process = None
-        self.is_training = False
-        self.stop_training_btn.setEnabled(False)
-        self.step_buttons[4].setText("5. 开始训练")
-        
-        # 验证LoRA权重
-        self.validate_lora_weights()
-        
-        self.on_step_finished(step_index)
-
-
-    def validate_lora_weights(self):
-        """验证LoRA权重是否正确处理"""
-        try:
-            dataset_path = os.path.join(self.base_audio_dir, self.current_audio_name + "_prep")
-            checkpoint_dir = os.path.join(os.path.dirname(dataset_path), "checkpoints")
-            
-            if not os.path.exists(checkpoint_dir):
-                return False
-                
-            step_dirs = [d for d in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, d)) and "step=" in d]
-            if not step_dirs:
-                return False
-                
-            latest_dir = sorted(step_dirs, key=lambda x: int(x.split("step=")[-1].split("_")[0]))[-1]
-            lora_dir = os.path.join(checkpoint_dir, latest_dir)
-            processed_lora = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
-            original_lora = os.path.join(lora_dir, "pytorch_lora_weights.safetensors")
-            
-            # 检查处理后的文件是否存在
-            if os.path.exists(processed_lora):
-                self.log("✓ 使用带alpha的LoRA权重文件")
-                return True
-            elif os.path.exists(original_lora):
-                self.log("⚠ 警告：使用原始LoRA权重文件，可能缺少alpha信息")
-                return True
-            else:
-                self.log("✗ 未找到LoRA权重文件")
-                return False
-                
-        except Exception as e:
-            self.log(f"验证LoRA权重时出错: {str(e)}")
-            return False
-
-
-
-
-    def on_step_finished(self, step_index):
-        self.step_status[step_index] = True
-        self.log(f"步骤 {step_index + 1} 完成。")
-
-        # 步骤1完成后显示提示词
-        if step_index == 0:
-            self.display_prompts()
-        # 步骤2完成后显示歌词
-        elif step_index == 1:
-            self.display_lyrics()
-
-        if step_index < 4:
-            self.step_buttons[step_index + 1].setEnabled(True)
-
-    def display_prompts(self):
-        """显示生成的提示词内容"""
-        try:
-            # 修正文件路径，使用正确的命名格式
-            prompts_file = os.path.join(self.current_audio_dir, f"{self.current_audio_name}_prompt.txt")
-            if os.path.exists(prompts_file):
-                with open(prompts_file, 'r', encoding='utf-8') as f:
+    def display_prompt_content(self):
+        prompt_file = self.audio_folder / f"{self.audio_name}_prompt.txt"
+        if prompt_file.exists():
+            try:
+                with open(prompt_file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    self.prompt_display.setPlainText(content)
-            else:
-                self.prompt_display.setPlainText("未找到提示词文件")
-        except Exception as e:
-            self.prompt_display.setPlainText(f"读取提示词文件失败: {str(e)}")
+                self.prompt_display.setPlainText(content)
+                self.log_box.append(f"✅ 提示词已加载到显示框")
+            except Exception as e:
+                self.log_box.append(f"❌ 读取提示词文件失败: {str(e)}")
+        else:
+            self.log_box.append(f"⚠️ 未找到提示词文件: {prompt_file} (可能生成失败)")
 
-    def display_lyrics(self):
-        """显示生成的歌词内容"""
-        try:
-            # 修正文件路径，使用正确的命名格式
-            lyrics_file = os.path.join(self.current_audio_dir, f"{self.current_audio_name}_lyrics.txt")
-            if os.path.exists(lyrics_file):
+    def display_lyrics_content(self):
+        lyrics_file = self.audio_folder / f"{self.audio_name}_lyrics.txt"
+        if lyrics_file.exists():
+            try:
                 with open(lyrics_file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    self.lyric_display.setPlainText(content)
-            else:
-                self.lyric_display.setPlainText("未找到歌词文件")
-        except Exception as e:
-            self.lyric_display.setPlainText(f"读取歌词文件失败: {str(e)}")
+                self.lyrics_display.setPlainText(content)
+                self.log_box.append(f"✅ 歌词已加载到显示框")
+            except Exception as e:
+                self.log_box.append(f"❌ 读取歌词文件失败: {str(e)}")
+        else:
+            self.log_box.append(f"⚠️ 未找到歌词文件: {lyrics_file} (可能生成失败)")
+
+    def create_dataset(self):
+        if not self.audio_name:
+            QMessageBox.warning(self, "错误", "请先上传音频文件")
+            return
+            
+        self.log_box.append("正在创建数据集...")
+        
+        # 清理可能已存在的数据集文件夹
+        output_name = self.audio_folder.parent / f"{self.audio_name}_filenames"
+        if output_name.exists():
+            shutil.rmtree(output_name)
+            self.log_box.append(f"🗑️ 已删除已存在的数据集文件夹: {output_name}")
+        
+        cmd = f'python convert2hf_dataset_new.py --data_dir {self.audio_folder} --output_name {output_name}'
+        process = self.run_command(cmd)
+        process.finished.connect(lambda exit_code, exit_status: self.log_script_result(
+            exit_code, exit_status, "数据集创建"))
+
+    def preprocess_audio(self):
+        if not self.audio_name:
+            QMessageBox.warning(self, "错误", "请先上传音频文件")
+            return
+            
+        self.log_box.append("正在进行音频预处理...")
+        
+        # 清理可能已存在的预处理文件夹
+        output_dir = self.audio_folder.parent / f"{self.audio_name}_prep"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+            self.log_box.append(f"🗑️ 已删除已存在的预处理文件夹: {output_dir}")
+        
+        input_name = self.audio_folder.parent / f"{self.audio_name}_filenames"
+        cmd = f'python preprocess_dataset_new.py --input_name {input_name} --output_dir {output_dir}'
+        process = self.run_command(cmd)
+        process.finished.connect(lambda exit_code, exit_status: self.log_script_result(
+            exit_code, exit_status, "音频预处理"))
+
+    def log_script_result(self, exit_code, exit_status, operation_name):
+        """记录脚本执行结果"""
+        if exit_code == 0:
+            self.log_box.append(f"✅ {operation_name}完成")
+        else:
+            self.log_box.append(f"❌ {operation_name}失败 (退出码: {exit_code})")
+
+    def start_training(self):
+        if not self.update_params():
+            return
+        if not self.audio_name:
+            QMessageBox.warning(self, "错误", "请先上传音频文件")
+            return
+            
+        self.log_box.append("正在检查并清理 checkpoints 文件夹...")
+        ckpt_dir = self.base_dir / "checkpoints"
+        if ckpt_dir.exists() and any(ckpt_dir.iterdir()):
+            shutil.rmtree(ckpt_dir)
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            self.log_box.append("🗑️ 已清空 checkpoints 文件夹")
+        else:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        self.log_box.append("正在启动训练...")
+        dataset_path = self.audio_folder.parent / f"{self.audio_name}_prep"
+        cmd = (
+            f'python trainer_new.py --dataset_path {dataset_path} '
+            f'--batch_size {self.params["batch_size"]} '
+            f'--num_workers {self.params["num_workers"]} '
+            f'--tag_dropout {self.params["tag_dropout"]} '
+            f'--learning_rate {self.params["learning_rate"]} '
+            f'--max_steps {self.params["max_steps"]} '
+            f'--precision {self.params["precision"]} '  # 这里去掉了双引号
+            f'--save_every_n_train_steps {self.params["save_every_n_train_steps"]}'
+        )
+        process = self.run_command(cmd)
+        process.finished.connect(lambda exit_code, exit_status: self.log_script_result(
+            exit_code, exit_status, "训练"))
+
 
     def start_tensorboard(self):
-        try:
-            # 检查是否有训练日志
-            tb_logs_dir = "tb_logs"
-            if not os.path.exists(tb_logs_dir):
-                self.log("TensorBoard日志目录不存在，请先开始训练以生成日志文件。")
-                return
-                
-            # 检查目录是否为空
-            if not os.listdir(tb_logs_dir):
-                self.log("TensorBoard日志目录为空，请先开始训练以生成日志文件。")
-                return
-                
-            subprocess.Popen(["tensorboard", "--logdir", tb_logs_dir])
-            webbrowser.open("http://localhost:6006")
-            self.log("TensorBoard已启动，请在浏览器中查看 http://localhost:6006")
-        except Exception as e:
-            self.log(f"启动 TensorBoard 失败: {e}")
+        self.log_box.append("正在启动 TensorBoard...")
+        tb_logs_dir = self.base_dir / "tb_logs"
+        if not tb_logs_dir.exists():
+            tb_logs_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["tensorboard", "--logdir", str(tb_logs_dir)], shell=True)
+        self.log_box.append("✅ TensorBoard 已启动，请访问 http://localhost:6006")
 
     def reset_all(self):
-        # 重置参数到默认值
-        self.batch_size_spin.setValue(self.default_params['batch_size'])
-        self.num_workers_spin.setValue(self.default_params['num_workers'])
-        self.tag_dropout_spin.setValue(self.default_params['tag_dropout'])
-        self.learning_rate_edit.setText(self.default_params['learning_rate'])
-        self.max_steps_spin.setValue(self.default_params['max_steps'])
-        self.precision_edit.setText(self.default_params['precision'])
-        self.save_steps_spin.setValue(self.default_params['save_steps'])
-        
-        # 清空内容显示
-        self.prompt_display.clear()
-        self.lyric_display.clear()
-        
-        # 如果有上传的音频文件，删除相关目录
-        if self.current_audio_name and self.current_audio_dir:
-            try:
-                # 删除音频文件目录
-                if os.path.exists(self.current_audio_dir):
-                    shutil.rmtree(self.current_audio_dir)
-                    self.log(f"已删除音频目录: {self.current_audio_dir}")
-                
-                # 删除相关生成目录
-                related_dirs = [
-                    self.current_audio_dir + "_filenames",
-                    self.current_audio_dir + "_prep"
-                ]
-                
-                for dir_path in related_dirs:
-                    if os.path.exists(dir_path):
-                        shutil.rmtree(dir_path)
-                        self.log(f"已删除相关目录: {dir_path}")
-                
-                # 删除checkpoints目录（如果存在）
-                checkpoints_dir = os.path.join(os.path.dirname(self.current_audio_dir), "checkpoints")
-                if os.path.exists(checkpoints_dir):
-                    shutil.rmtree(checkpoints_dir)
-                    self.log(f"已删除checkpoints目录: {checkpoints_dir}")
-                    
-            except Exception as e:
-                self.log(f"删除文件时出错: {str(e)}")
-        
-        # 重置所有状态
-        self.current_audio_name = ""
-        self.current_audio_full_path = ""
-        self.current_audio_dir = ""
-        self.step_status = [False] * 6
-        self.audio_file_label.setText("训练音频文件：未选择")
-        for btn in self.step_buttons:
-            btn.setEnabled(False)
-        self.log_area.clear()
-        self.log("已重置所有设置和文件。")
+        reply = QMessageBox.question(
+            self, "确认重置", "确定要重置所有内容吗？这将删除所有生成的文件和文件夹。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            # 重置参数
+            self.params = DEFAULT_PARAMS.copy()
+            self.batch_size_edit.setText(str(self.params['batch_size']))
+            self.num_workers_edit.setText(str(self.params['num_workers']))
+            self.tag_dropout_edit.setText(str(self.params['tag_dropout']))
+            self.learning_rate_edit.setText(str(self.params['learning_rate']))
+            self.max_steps_edit.setText(str(self.params['max_steps']))
+            self.precision_edit.setText(str(self.params['precision']))
+            self.save_every_n_steps_edit.setText(str(self.params['save_every_n_train_steps']))
+            
+            # 清空显示内容
+            self.prompt_display.clear()
+            self.lyrics_display.clear()
+            
+            # 重置文件相关变量
+            self.audio_name = ""
+            self.audio_folder = ""
+            
+            # 删除生成的文件夹
+            folders_to_delete = ["Taudio", "checkpoints", "tb_logs"]
+            for folder_name in folders_to_delete:
+                folder_path = self.base_dir / folder_name
+                if folder_path.exists():
+                    shutil.rmtree(folder_path)
+                    self.log_box.append(f"🗑️ 已删除文件夹: {folder_name}")
+            
+            self.log_box.append("✅ 所有内容已重置")
 
-    def process_lora_alpha(self):
-        """训练完成后自动处理 LoRA 权重"""
+    def check_python_environment(self):
+        """检查 Python 环境"""
+        self.log_box.append(f"Python 解释器: {sys.executable}")
         try:
-            # 获取训练输出路径（假设是与 prep 目录同级的 checkpoints）
-            dataset_path = os.path.join(self.base_audio_dir, self.current_audio_name + "_prep")
-            checkpoint_dir = os.path.join(os.path.dirname(dataset_path), "checkpoints")
-
-            if not os.path.exists(checkpoint_dir):
-                self.log("未找到任何 epoch-step 目录，跳过 LoRA alpha 处理。")
-                return
-
-            # 获取所有 step 目录
-            step_dirs = [d for d in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, d)) and "step=" in d]
-            if not step_dirs:
-                self.log("未找到任何 epoch-step 目录，跳过 LoRA alpha 处理。")
-                return
-
-            # 找到最新的 step 目录
-            latest_dir = sorted(step_dirs, key=lambda x: int(x.split("step=")[-1].split("_")[0]))[-1]
-            lora_dir = os.path.join(checkpoint_dir, latest_dir)
-            input_lora_path = os.path.join(lora_dir, "pytorch_lora_weights.safetensors")
-            output_lora_path = os.path.join(lora_dir, "pytorch_lora_weights_with_alpha.safetensors")
-            lora_config_path = os.path.join(lora_dir, "lora_config.json")
-
-            # 检查原始LoRA文件是否存在
-            if not os.path.exists(input_lora_path):
-                self.log(f"未找到 LoRA 权重文件: {input_lora_path}")
-                # 检查是否已经有处理过的文件
-                if os.path.exists(output_lora_path):
-                    self.log("使用已存在的带alpha的LoRA文件")
-                    return
-                return
-
-            # 检查配置文件是否存在
-            if not os.path.exists(lora_config_path):
-                self.log(f"未找到 LoRA 配置文件: {lora_config_path}")
-                return
-
-            # 构建命令
-            cmd = (
-                f'python add_alpha_in_lora.py '
-                f'--input_name "{input_lora_path}" '
-                f'--output_name "{output_lora_path}" '
-                f'--lora_config_path "{lora_config_path}"'
-            )
-
-            self.log("开始处理 LoRA 权重，写入 alpha 信息...")
-            self.log(f"执行命令: {cmd}")
-
-            result = subprocess.run(cmd, shell=True, cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True)
-            if result.returncode == 0:
-                self.log("✅ LoRA alpha 处理成功完成！")
-                self.log(f"新 LoRA 文件保存为: {output_lora_path}")
-                # 重要：删除原始文件，确保使用带alpha的文件
-                try:
-                    os.remove(input_lora_path)
-                    self.log("已删除原始LoRA文件，确保使用带alpha的版本")
-                except Exception as e:
-                    self.log(f"删除原始LoRA文件时出错: {str(e)}")
-            else:
-                self.log("❌ LoRA alpha 处理失败:")
-                self.log(result.stderr)
-
-        except Exception as e:
-            self.log(f"处理 LoRA alpha 时发生异常: {str(e)}")
-
-class TrainingWorkerThread(QThread):
-    output = Signal(str)
-    error = Signal(str)
-    finished = Signal()
-
-    def __init__(self, command, cwd=None):
-        super().__init__()
-        self.command = command
-        self.cwd = cwd
-        self.process = None
-        self._stop_flag = False
-
-    def run(self):
+            import torch
+            self.log_box.append(f"✅ PyTorch 可用: {torch.__version__}")
+        except ImportError:
+            self.log_box.append("❌ PyTorch 未安装或不可用")
+        
         try:
-            self.process = subprocess.Popen(
-                self.command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                shell=True,
-                cwd=self.cwd,
-                bufsize=1,
-                universal_newlines=True
-            )
-            
-            # 实时读取输出
-            while not self._stop_flag and self.process.poll() is None:
-                output = self.process.stdout.readline()
-                if output:
-                    self.output.emit(output.strip())
-            
-            # 读取剩余输出
-            if self.process and not self._stop_flag:
-                stdout, stderr = self.process.communicate()
-                if stdout:
-                    for line in stdout.splitlines():
-                        if line.strip():
-                            self.output.emit(line.strip())
-                if stderr:
-                    self.error.emit(f"错误: {stderr}")
-                
-                if self.process.returncode == 0:
-                    self.output.emit("训练完成！")
-                else:
-                    self.error.emit(f"训练异常结束，返回码: {self.process.returncode}")
-            
-            self.finished.emit()
-            
-        except Exception as e:
-            self.error.emit(f"训练过程中发生异常: {str(e)}")
-            self.finished.emit()
+            import transformers
+            self.log_box.append(f"✅ Transformers 可用: {transformers.__version__}")
+        except ImportError:
+            self.log_box.append("❌ Transformers 未安装或不可用")
 
-    def stop(self):
-        self._stop_flag = True
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = ACEStepGUI()
+    window = ACEStepTrainerGUI()
     window.show()
-    sys.exit(app.exec())
-
+    sys.exit(app.exec_())

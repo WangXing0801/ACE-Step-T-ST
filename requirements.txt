@@ -36,5 +36,5 @@ qwen-omni-utils==0.0.4
 requests==2.32.3
 safetensors==0.5.3
 wandb==0.20.1
-pyside6
+PyQt5
 pypinyin

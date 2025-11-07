@@ -468,7 +468,7 @@ def main(args):
     trainer = Trainer(
         accelerator="gpu",
         precision=args.precision,
-        log_every_n_steps=1,
+        log_every_n_steps=5,
         logger=logger_callback,
         callbacks=[checkpoint_callback],
         max_epochs=args.epochs,
