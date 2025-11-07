@@ -50,8 +50,7 @@ python trainer_new.py --dataset_path D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\1_prep 
 
 训练结束后模型会以文件夹的形势保存至项目根目录的 checkpoints，至于生成几个文件夹看你设置的多少步保存一次了。
 原生的 ACE-Step 项目使用的lora模型是写死的用 huggingface 的模型，我改成了动态读取 checkpoints 下的模型了，你把你训练好的模型扔进文件夹去就行了。
-
-
+替换 原生的 ACE-Step 项目的ui文件我也已经放到了项目里了。
 
 gui要求底部要有日志框，以上步骤按序号顺序执行，没有执行完上一步骤不可以进行下一步。
 增加启动 TensorBoardLogger 功能按钮，启动后使用默认浏览器自动打开对应网站。
