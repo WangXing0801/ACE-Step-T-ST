@@ -39,6 +39,8 @@ python trainer_new.py --dataset_path D:\AIJOB\ACE-Step-T\ACE-Step\Taudio\1_prep 
 <img width="1889" height="880" alt="image" src="https://github.com/user-attachments/assets/e08b1744-2c7e-4cc9-ae7a-7a50d57e66b8" />
 训练好的lora文件夹名称可以更改
 <img width="904" height="407" alt="image" src="https://github.com/user-attachments/assets/44fc710e-8d06-4dab-86b8-8aa23970e89d" />
+<img width="1813" height="815" alt="image" src="https://github.com/user-attachments/assets/6828eb20-d221-4d0d-8864-12f1cf159f69" />
+
 
 
 gui要求底部要有日志框，以上步骤按序号顺序执行，没有执行完上一步骤不可以进行下一步。
